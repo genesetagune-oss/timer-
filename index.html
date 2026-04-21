@@ -71,6 +71,29 @@ function bCountdown()  { tone(700, .06, .12); }
 function bTransition() { tone(880,.10,.25,'sine',0); tone(880,.10,.25,'sine',.16); tone(1320,.22,.38,'sine',.32); }
 function bFinish()     { [523,659,784,1047].forEach(function(f,i){ tone(f,.15,.3,'sine',i*.13); }); }
 
+/* ── Keep-awake: silent audio loop que impede o iOS de pausar o JS ───────
+   O iOS só mantém JS rodando em background se houver áudio ativo.
+   Tocamos um oscilador a volume zero — inaudível mas suficiente.       ── */
+var _kaOsc = null, _kaGain = null;
+function startKeepAwake() {
+  if (_kaOsc) return;
+  try {
+    var ctx  = getAc();
+    _kaGain  = ctx.createGain();
+    _kaGain.gain.value = 0.001; // quase zero, inaudível
+    _kaGain.connect(ctx.destination);
+    _kaOsc   = ctx.createOscillator();
+    _kaOsc.frequency.value = 1;  // 1 Hz — abaixo do limiar auditivo
+    _kaOsc.connect(_kaGain);
+    _kaOsc.start();
+  } catch(e) {}
+}
+function stopKeepAwake() {
+  try { if (_kaOsc) { _kaOsc.stop(); } } catch(e) {}
+  try { if (_kaGain) { _kaGain.disconnect(); } } catch(e) {}
+  _kaOsc = null; _kaGain = null;
+}
+
 /* ══════════════════════════════ RING SVG ═══════════════════════════════════ */
 function Ring(props) {
   var r    = props.size / 2 - props.sw;
@@ -152,7 +175,7 @@ function App() {
         var list = R.current.ivs;
         if (nc >= list.length) {
           setRun(false); setDone(true); setTl(0);
-          endRef.current = null; bFinish();
+          endRef.current = null; stopKeepAwake(); bFinish();
         } else {
           bTransition();
           var nextSecs = list[nc].minutes * 60;
@@ -186,7 +209,7 @@ function App() {
 
       if (idx >= list.length) {
         setRun(false); setDone(true); setTl(0);
-        endRef.current = null; bFinish();
+        endRef.current = null; stopKeepAwake(); bFinish();
       } else {
         var remainingMs = list[idx].minutes * 60 * 1000 - overflow;
         endRef.current  = Date.now() + remainingMs;
@@ -214,6 +237,7 @@ function App() {
       endRef.current = Date.now() + tl * 1000;
     }
     beepRef.current = null;
+    startKeepAwake();
     setRun(true);
   }
   function pause() {
@@ -222,11 +246,13 @@ function App() {
       setTl(rem);
     }
     endRef.current = null;
+    stopKeepAwake();
     setRun(false);
   }
   function reset() {
     setRun(false); setDone(false); setCi(0);
     endRef.current = null; beepRef.current = null;
+    stopKeepAwake();
     if (ivs.length) setTl(ivs[0].minutes * 60);
   }
   function skip() {
