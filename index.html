@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Timer">
+  <meta name="theme-color" content="#030712">
+  <link rel="manifest" href="manifest.json">
+  <title>Interval Timer</title>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    input, textarea { -webkit-user-select: text; user-select: text; }
+    html, body { margin: 0; padding: 0; overscroll-behavior: none; -webkit-font-smoothing: antialiased; }
+
+    @keyframes pulse-ring {
+      0%   { transform: scale(.97); opacity: .45; }
+      65%  { transform: scale(1.07); opacity: .18; }
+      100% { transform: scale(1.12); opacity: 0;   }
+    }
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0);    }
+    }
+    .fade-up { animation: fade-up .22s ease; }
+    input[type=number] { -moz-appearance: textfield; }
+    input[type=number]::-webkit-outer-spin-button,
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  </style>
+</head>
+<body class="bg-[#030712]">
+<div id="root"></div>
+
+<script>
+const { useState, useEffect, useRef } = React;
+const html = htm.bind(React.createElement);
+
+/* ═══════════════════════════════ AUDIO ════════════════════════════════════ */
+let _ac = null;
+function getAc() {
+  if (!_ac) _ac = new (window.AudioContext || window.webkitAudioContext)();
+  if (_ac.state === 'suspended') _ac.resume();
+  return _ac;
+}
+function tone(hz, dur, vol, type, delay) {
+  vol = vol || 0.25; type = type || 'sine'; delay = delay || 0;
+  try {
+    const ctx = getAc(), t0 = ctx.currentTime + delay;
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.connect(g); g.connect(ctx.destination);
+    osc.type = type; osc.frequency.value = hz;
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    osc.start(t0); osc.stop(t0 + dur + 0.02);
+  } catch(e) {}
+}
+function bCountdown()  { tone(700, .06, .12); }
+function bTransition() { tone(880,.10,.25,'sine',0); tone(880,.10,.25,'sine',.16); tone(1320,.22,.38,'sine',.32); }
+function bFinish()     { [523,659,784,1047].forEach(function(f,i){ tone(f,.15,.3,'sine',i*.13); }); }
+
+/* ══════════════════════════════ RING SVG ═══════════════════════════════════ */
+function Ring(props) {
+  var r    = props.size / 2 - props.sw;
+  var circ = 2 * Math.PI * r;
+  var dash = circ * (1 - Math.max(0, Math.min(1, props.pct)));
+  return html`
+    <svg width=${props.size} height=${props.size} style=${{ transform:'rotate(-90deg)', display:'block' }}>
+      <circle cx=${props.size/2} cy=${props.size/2} r=${r}
+        fill="none" stroke=${props.bg} strokeWidth=${props.sw} />
+      <circle cx=${props.size/2} cy=${props.size/2} r=${r}
+        fill="none" stroke=${props.color} strokeWidth=${props.sw}
+        strokeDasharray=${circ} strokeDashoffset=${dash} strokeLinecap="round"
+        style=${{ transition:'stroke-dashoffset .92s linear, stroke .65s ease' }} />
+    </svg>`;
+}
+
+/* ══════════════════════════════ MAIN APP ═══════════════════════════════════ */
+var DEFAULTS = [
+  { id:1, label:'Bloco 1',     minutes:12 },
+  { id:2, label:'Descanso',    minutes:5  },
+  { id:3, label:'Bloco 2',     minutes:3  },
+  { id:4, label:'Finalização', minutes:2  },
+];
+
+function fmt(s) {
+  return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+}
+
+function loadSaved() {
+  try {
+    var saved = JSON.parse(localStorage.getItem('it-intervals'));
+    return (saved && saved.length) ? saved : DEFAULTS;
+  } catch(e) { return DEFAULTS; }
+}
+
+function App() {
+  var _ivs    = useState(loadSaved);
+  var ivs     = _ivs[0], setIvs = _ivs[1];
+  var _ci     = useState(0);
+  var ci      = _ci[0],  setCi  = _ci[1];
+  var _tl     = useState(function(){ return (loadSaved()[0] ? loadSaved()[0].minutes : 12) * 60; });
+  var tl      = _tl[0],  setTl  = _tl[1];
+  var _run    = useState(false);
+  var run     = _run[0], setRun = _run[1];
+  var _done   = useState(false);
+  var done    = _done[0], setDone = _done[1];
+  var _bio    = useState(false);
+  var bio     = _bio[0], setBio = _bio[1];
+  var _inpL   = useState('');
+  var inpL    = _inpL[0], setInpL = _inpL[1];
+  var _inpM   = useState('');
+  var inpM    = _inpM[0], setInpM = _inpM[1];
+
+  var R = useRef({});
+  R.current = { ivs: ivs, ci: ci, tl: tl };
+
+  useEffect(function() {
+    localStorage.setItem('it-intervals', JSON.stringify(ivs));
+  }, [ivs]);
+
+  useEffect(function() {
+    if (!run) return;
+    var id = setInterval(function() {
+      var t    = R.current.tl;
+      var c    = R.current.ci;
+      var list = R.current.ivs;
+      var n    = t - 1;
+      if (n === 3 || n === 2 || n === 1) bCountdown();
+      if (n <= 0) {
+        var nc = c + 1;
+        if (nc >= list.length) {
+          setRun(false); setDone(true); setTl(0); bFinish();
+        } else {
+          bTransition(); setCi(nc); setTl(list[nc].minutes * 60);
+        }
+      } else {
+        setTl(n);
+      }
+    }, 1000);
+    return function() { clearInterval(id); };
+  }, [run]);
+
+  useEffect(function() {
+    if (!run && !done && ivs.length > 0) {
+      var idx = Math.min(ci, ivs.length - 1);
+      setTl(ivs[idx].minutes * 60);
+    }
+  }, [ivs]);
+
+  function start() {
+    getAc();
+    if (done) { setDone(false); setCi(0); setTl((ivs[0] ? ivs[0].minutes : 0) * 60); }
+    setRun(true);
+  }
+  function pause() { setRun(false); }
+  function reset() {
+    setRun(false); setDone(false); setCi(0);
+    if (ivs.length) setTl(ivs[0].minutes * 60);
+  }
+  function skip() {
+    var nc = ci + 1;
+    if (nc >= ivs.length) return;
+    setCi(nc); setTl(ivs[nc].minutes * 60);
+  }
+  function addIv() {
+    var m = parseFloat(inpM);
+    if (!m || m <= 0) return;
+    setIvs(function(p) {
+      return p.concat([{ id: Date.now(), label: inpL.trim() || ('Intervalo ' + (p.length+1)), minutes: m }]);
+    });
+    setInpL(''); setInpM('');
+  }
+  function delIv(id) {
+    var next = ivs.filter(function(i) { return i.id !== id; });
+    setIvs(next);
+    if (!next.length) { setTl(0); return; }
+    if (ci >= next.length) { var ni = next.length-1; setCi(ni); setTl(next[ni].minutes*60); }
+  }
+  function swapIv(a, b) {
+    setIvs(function(p) {
+      if (b < 0 || b >= p.length) return p;
+      var r = p.slice(); var tmp = r[a]; r[a] = r[b]; r[b] = tmp; return r;
+    });
+  }
+
+  var cur       = ivs[ci];
+  var nxt       = ivs[ci + 1];
+  var curTotal  = cur ? cur.minutes * 60 : 1;
+  var pct       = (curTotal - tl) / curTotal;
+  var totalMin  = ivs.reduce(function(s,x){ return s+x.minutes; }, 0);
+  var elapsed   = ivs.slice(0,ci).reduce(function(s,x){ return s+x.minutes; },0) + (cur ? cur.minutes*pct : 0);
+  var globalPct = totalMin ? elapsed / totalMin : 0;
+
+  var T = bio ? {
+    root:   'bg-black',
+    card:   'bg-[#080000] border border-[#3a0000]',
+    text:   'text-[#ff6030]',
+    muted:  'text-[#5a1010]',
+    accent: '#FF4500',
+    ringBg: '#1a0000',
+    timer:  '#FF6B35',
+    btn:    'bg-[#3d0000] hover:bg-[#5a0000] border border-[#7a1010] text-[#ff6030]',
+    inp:    'bg-black border border-[#3a0000] text-[#ff6030] placeholder-[#3a0000] focus:border-[#7a1010] outline-none',
+    active: 'bg-[#3d0000] border-[#7a1010]',
+    ghost:  'bg-[#080000] border border-[#3a0000] text-[#5a1010] hover:text-[#ff6030]',
+  } : {
+    root:   'bg-[#030712]',
+    card:   'bg-gray-900 border border-gray-800',
+    text:   'text-white',
+    muted:  'text-gray-500',
+    accent: '#6366f1',
+    ringBg: '#1f2937',
+    timer:  '#ffffff',
+    btn:    'bg-indigo-600 hover:bg-indigo-500 text-white',
+    inp:    'bg-gray-800 border border-gray-700 text-gray-100 placeholder-gray-600 focus:border-indigo-500 outline-none',
+    active: 'bg-indigo-950 border-indigo-700',
+    ghost:  'bg-gray-900 border border-gray-700 text-gray-500 hover:text-white',
+  };
+
+  return html`
+    <div className=${'min-h-screen ' + T.root + ' flex flex-col items-center px-4 pb-16 transition-colors duration-700'}
+      style=${{ paddingTop:'max(16px, env(safe-area-inset-top))' }}>
+
+      <header className="w-full max-w-sm flex justify-between items-center py-4 mb-3">
+        <span className=${'text-[10px] font-bold tracking-[.35em] uppercase ' + T.muted}>
+          Interval Timer
+        </span>
+        <button onClick=${() => setBio(function(b){ return !b; })}
+          className=${'px-3 py-1.5 rounded-full text-[10px] font-bold tracking-wider uppercase transition-all duration-700 border ' + (bio
+            ? 'bg-[#1a0000] border-[#7a1010] text-[#ff4040]'
+            : 'bg-gray-900 border-gray-700 text-gray-400 hover:text-gray-200')}>
+          ${bio ? '◉ Biohack' : '◎ Noturno'}
+        </button>
+      </header>
+
+      <div className="relative mb-2" style=${{ width:252, height:252 }}>
+        ${run && html`<div className="absolute inset-0 rounded-full pointer-events-none"
+          style=${{ border:'2px solid '+T.accent, animation:'pulse-ring 2.2s ease-out infinite' }}/>`}
+        <${Ring} pct=${pct} size=${252} color=${T.accent} bg=${T.ringBg} sw=${11} />
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <div className=${'font-mono font-black leading-none transition-colors duration-700'}
+            style=${{ fontSize:60, color:T.timer }}>
+            ${fmt(tl)}
+          </div>
+          <div className=${'text-xs mt-2.5 tracking-widest uppercase transition-colors duration-700 ' + T.muted}>
+            ${cur ? cur.label : '—'}
+          </div>
+          ${done && html`<div className="mt-1.5 text-[10px] font-bold tracking-widest text-green-400 animate-pulse">
+            CONCLUÍDO ✓
+          </div>`}
+        </div>
+      </div>
+
+      <div className=${'mb-5 text-[11px] tracking-wider h-5 flex items-center ' + T.muted}>
+        ${nxt ? ('→  ' + nxt.label + '  ·  ' + nxt.minutes + ' min') : ''}
+      </div>
+
+      <div className="flex items-center gap-4 mb-6">
+        <button onClick=${reset}
+          className=${'w-12 h-12 rounded-full flex items-center justify-center text-lg border transition-all duration-200 ' + T.ghost}
+          title="Reset">↺</button>
+
+        <button onClick=${run ? pause : start} disabled=${!ivs.length}
+          className=${'rounded-full flex items-center justify-center text-2xl font-bold transition-all duration-200 disabled:opacity-20 ' + T.btn}
+          style=${{ width:74, height:74, boxShadow: run ? 'none' : ('0 0 30px ' + T.accent + '55') }}>
+          ${run ? '⏸' : '▶'}
+        </button>
+
+        <button onClick=${skip} disabled=${ci+1 >= ivs.length}
+          className=${'w-12 h-12 rounded-full flex items-center justify-center text-lg border transition-all duration-200 disabled:opacity-20 ' + T.ghost}
+          title="Próximo">⏭</button>
+      </div>
+
+      ${ivs.length > 0 && html`
+        <div className="w-full max-w-sm mb-6 px-1">
+          <div className="flex justify-between mb-1.5" style=${{ fontSize:10 }}>
+            <span className=${T.muted}>${ci+1} / ${ivs.length} intervalos</span>
+            <span className=${T.muted}>${totalMin.toFixed(1)} min total</span>
+          </div>
+          <div className="h-px rounded-full overflow-hidden" style=${{ background:T.ringBg }}>
+            <div className="h-full rounded-full transition-all duration-1000"
+              style=${{ width:(globalPct*100)+'%', background:T.accent }} />
+          </div>
+        </div>`}
+
+      <div className=${'w-full max-w-sm rounded-2xl p-4 mb-3 transition-colors duration-700 ' + T.card}>
+        <div className=${'text-[10px] font-bold tracking-[.25em] uppercase mb-3 ' + T.muted}>
+          Adicionar Intervalo
+        </div>
+        <div className="flex gap-2">
+          <input type="text" placeholder="Nome (opcional)" value=${inpL}
+            onInput=${function(e){ setInpL(e.target.value); }}
+            className=${'flex-1 rounded-xl px-3 py-2.5 text-sm border transition-all duration-500 ' + T.inp} />
+          <input type="number" placeholder="min" value=${inpM}
+            onInput=${function(e){ setInpM(e.target.value); }}
+            onKeyDown=${function(e){ if(e.key==='Enter') addIv(); }}
+            min="0.1" step="0.5"
+            className=${'w-16 rounded-xl px-2 py-2.5 text-sm border text-center transition-all duration-500 ' + T.inp} />
+          <button onClick=${addIv}
+            className=${'w-11 h-11 rounded-xl font-bold text-xl flex items-center justify-center transition-all duration-200 ' + T.btn}>
+            +
+          </button>
+        </div>
+      </div>
+
+      <div className="w-full max-w-sm space-y-1.5">
+        ${ivs.map(function(iv, i) {
+          return html`
+            <div key=${iv.id}
+              className=${'flex items-center gap-2 px-3 py-2.5 rounded-xl border transition-all duration-500 fade-up ' + (i===ci ? T.active : T.card)}>
+              <span className=${'text-xs font-mono w-5 text-center shrink-0 ' + T.muted}>${i+1}</span>
+              <span className=${'flex-1 text-sm truncate ' + (i===ci ? T.text : T.muted)}>${iv.label}</span>
+              <span className=${'font-mono text-sm font-bold shrink-0 mr-1 ' + (i===ci ? T.text : T.muted)}>${iv.minutes}m</span>
+              <div className="flex flex-col gap-px shrink-0">
+                <button onClick=${function(){ swapIv(i,i-1); }} disabled=${i===0}
+                  className=${'text-[10px] leading-tight px-0.5 disabled:opacity-20 transition-opacity ' + T.muted}>▲</button>
+                <button onClick=${function(){ swapIv(i,i+1); }} disabled=${i===ivs.length-1}
+                  className=${'text-[10px] leading-tight px-0.5 disabled:opacity-20 transition-opacity ' + T.muted}>▼</button>
+              </div>
+              <button onClick=${function(){ delIv(iv.id); }}
+                className=${'text-xl leading-none shrink-0 ml-0.5 hover:text-red-500 transition-colors ' + T.muted}>×</button>
+            </div>`;
+        })}
+        ${!ivs.length && html`
+          <p className=${'text-center py-10 text-sm ' + T.muted}>
+            Nenhum intervalo — adicione acima
+          </p>`}
+      </div>
+    </div>`;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App}/>`);
+</script>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('sw.js').catch(function(){});
+  });
+}
+</script>
+</body>
+</html>
