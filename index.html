@@ -124,34 +124,78 @@ function App() {
   var _inpM   = useState('');
   var inpM    = _inpM[0], setInpM = _inpM[1];
 
-  var R = useRef({});
-  R.current = { ivs: ivs, ci: ci, tl: tl };
+  var R        = useRef({});
+  var endRef   = useRef(null);  // absolute timestamp when current interval ends
+  var beepRef  = useRef(null);  // last second we played countdown beep
+  R.current = { ivs: ivs, ci: ci, run: run };
 
   useEffect(function() {
     localStorage.setItem('it-intervals', JSON.stringify(ivs));
   }, [ivs]);
 
+  // ── Tick: uses Date.now() so it self-corrects after background ──────────
   useEffect(function() {
     if (!run) return;
     var id = setInterval(function() {
-      var t    = R.current.tl;
-      var c    = R.current.ci;
-      var list = R.current.ivs;
-      var n    = t - 1;
-      if (n === 3 || n === 2 || n === 1) bCountdown();
-      if (n <= 0) {
-        var nc = c + 1;
+      if (!endRef.current) return;
+      var remaining = Math.ceil((endRef.current - Date.now()) / 1000);
+
+      // countdown beeps — fire once per second only
+      if (remaining <= 3 && remaining > 0 && remaining !== beepRef.current) {
+        beepRef.current = remaining;
+        bCountdown();
+      }
+
+      if (remaining <= 0) {
+        beepRef.current = null;
+        var nc   = R.current.ci + 1;
+        var list = R.current.ivs;
         if (nc >= list.length) {
-          setRun(false); setDone(true); setTl(0); bFinish();
+          setRun(false); setDone(true); setTl(0);
+          endRef.current = null; bFinish();
         } else {
-          bTransition(); setCi(nc); setTl(list[nc].minutes * 60);
+          bTransition();
+          var nextSecs = list[nc].minutes * 60;
+          endRef.current = Date.now() + nextSecs * 1000;
+          setCi(nc); setTl(nextSecs);
         }
       } else {
-        setTl(n);
+        setTl(remaining);
       }
-    }, 1000);
+    }, 300);
     return function() { clearInterval(id); };
   }, [run]);
+
+  // ── Visibility: recalculate after returning from background ─────────────
+  useEffect(function() {
+    function onVisible() {
+      if (document.visibilityState !== 'visible') return;
+      if (!R.current.run || !endRef.current) return;
+      var now = Date.now();
+      if (now < endRef.current) return; // still within current interval
+
+      // figure out how many intervals passed while in background
+      var list     = R.current.ivs;
+      var overflow = now - endRef.current; // ms past end
+      var idx      = R.current.ci + 1;
+
+      while (idx < list.length && overflow >= list[idx].minutes * 60 * 1000) {
+        overflow -= list[idx].minutes * 60 * 1000;
+        idx++;
+      }
+
+      if (idx >= list.length) {
+        setRun(false); setDone(true); setTl(0);
+        endRef.current = null; bFinish();
+      } else {
+        var remainingMs = list[idx].minutes * 60 * 1000 - overflow;
+        endRef.current  = Date.now() + remainingMs;
+        setCi(idx); setTl(Math.ceil(remainingMs / 1000));
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return function() { document.removeEventListener('visibilitychange', onVisible); };
+  }, []);
 
   useEffect(function() {
     if (!run && !done && ivs.length > 0) {
@@ -162,18 +206,36 @@ function App() {
 
   function start() {
     getAc();
-    if (done) { setDone(false); setCi(0); setTl((ivs[0] ? ivs[0].minutes : 0) * 60); }
+    if (done) {
+      var firstSecs = (ivs[0] ? ivs[0].minutes : 0) * 60;
+      setDone(false); setCi(0); setTl(firstSecs);
+      endRef.current = Date.now() + firstSecs * 1000;
+    } else {
+      endRef.current = Date.now() + tl * 1000;
+    }
+    beepRef.current = null;
     setRun(true);
   }
-  function pause() { setRun(false); }
+  function pause() {
+    if (endRef.current) {
+      var rem = Math.max(1, Math.ceil((endRef.current - Date.now()) / 1000));
+      setTl(rem);
+    }
+    endRef.current = null;
+    setRun(false);
+  }
   function reset() {
     setRun(false); setDone(false); setCi(0);
+    endRef.current = null; beepRef.current = null;
     if (ivs.length) setTl(ivs[0].minutes * 60);
   }
   function skip() {
     var nc = ci + 1;
     if (nc >= ivs.length) return;
-    setCi(nc); setTl(ivs[nc].minutes * 60);
+    var nextSecs = ivs[nc].minutes * 60;
+    if (run) endRef.current = Date.now() + nextSecs * 1000;
+    beepRef.current = null;
+    setCi(nc); setTl(nextSecs);
   }
   function addIv() {
     var m = parseFloat(inpM);
