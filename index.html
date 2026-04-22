@@ -71,27 +71,45 @@ function bCountdown()  { tone(700, .06, .12); }
 function bTransition() { tone(880,.10,.25,'sine',0); tone(880,.10,.25,'sine',.16); tone(1320,.22,.38,'sine',.32); }
 function bFinish()     { [523,659,784,1047].forEach(function(f,i){ tone(f,.15,.3,'sine',i*.13); }); }
 
-/* ── Keep-awake: silent audio loop que impede o iOS de pausar o JS ───────
-   O iOS só mantém JS rodando em background se houver áudio ativo.
-   Tocamos um oscilador a volume zero — inaudível mas suficiente.       ── */
-var _kaOsc = null, _kaGain = null;
+/* ── Keep-awake: silent buffer loop — mais fiável no iOS que o oscilador ──
+   Buffer com ruído quase inaudível em loop; o iOS mantém o AudioContext
+   ativo enquanto houver uma fonte a tocar.                              ── */
+var _kaNode = null;
 function startKeepAwake() {
-  if (_kaOsc) return;
+  if (_kaNode) return;
   try {
-    var ctx  = getAc();
-    _kaGain  = ctx.createGain();
-    _kaGain.gain.value = 0.001; // quase zero, inaudível
-    _kaGain.connect(ctx.destination);
-    _kaOsc   = ctx.createOscillator();
-    _kaOsc.frequency.value = 1;  // 1 Hz — abaixo do limiar auditivo
-    _kaOsc.connect(_kaGain);
-    _kaOsc.start();
+    var ctx = getAc();
+    var buf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < data.length; i++) {
+      data[i] = (Math.random() * 2 - 1) * 0.00005; // abaixo do limiar auditivo
+    }
+    _kaNode = ctx.createBufferSource();
+    _kaNode.buffer = buf;
+    _kaNode.loop = true;
+    _kaNode.connect(ctx.destination);
+    _kaNode.start();
   } catch(e) {}
 }
 function stopKeepAwake() {
-  try { if (_kaOsc) { _kaOsc.stop(); } } catch(e) {}
-  try { if (_kaGain) { _kaGain.disconnect(); } } catch(e) {}
-  _kaOsc = null; _kaGain = null;
+  try { if (_kaNode) { _kaNode.stop(); _kaNode.disconnect(); } } catch(e) {}
+  _kaNode = null;
+}
+
+/* ── Wake Lock: mantém a tela acesa enquanto o timer está a correr ───────
+   Suportado no iOS Safari 16.4+. Se não estiver disponível, degrada
+   silenciosamente (o keep-awake de áudio ainda funciona).              ── */
+var _wakeLock = null;
+function requestWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  navigator.wakeLock.request('screen').then(function(wl) {
+    _wakeLock = wl;
+    _wakeLock.addEventListener('release', function() { _wakeLock = null; });
+  }).catch(function() {});
+}
+function releaseWakeLock() {
+  try { if (_wakeLock) _wakeLock.release(); } catch(e) {}
+  _wakeLock = null;
 }
 
 /* ══════════════════════════════ RING SVG ═══════════════════════════════════ */
@@ -175,7 +193,7 @@ function App() {
         var list = R.current.ivs;
         if (nc >= list.length) {
           setRun(false); setDone(true); setTl(0);
-          endRef.current = null; stopKeepAwake(); bFinish();
+          endRef.current = null; stopKeepAwake(); releaseWakeLock(); bFinish();
         } else {
           bTransition();
           var nextSecs = list[nc].minutes * 60;
@@ -194,6 +212,7 @@ function App() {
     function onVisible() {
       if (document.visibilityState !== 'visible') return;
       if (!R.current.run || !endRef.current) return;
+      requestWakeLock(); // iOS liberta o wake lock ao apagar a tela; re-pede ao voltar
       var now = Date.now();
       if (now < endRef.current) return; // still within current interval
 
@@ -209,11 +228,12 @@ function App() {
 
       if (idx >= list.length) {
         setRun(false); setDone(true); setTl(0);
-        endRef.current = null; stopKeepAwake(); bFinish();
+        endRef.current = null; stopKeepAwake(); releaseWakeLock(); bFinish();
       } else {
         var remainingMs = list[idx].minutes * 60 * 1000 - overflow;
         endRef.current  = Date.now() + remainingMs;
         setCi(idx); setTl(Math.ceil(remainingMs / 1000));
+        requestWakeLock(); // re-pede wake lock ao voltar do background
       }
     }
     document.addEventListener('visibilitychange', onVisible);
@@ -238,6 +258,7 @@ function App() {
     }
     beepRef.current = null;
     startKeepAwake();
+    requestWakeLock();
     setRun(true);
   }
   function pause() {
@@ -246,13 +267,13 @@ function App() {
       setTl(rem);
     }
     endRef.current = null;
-    stopKeepAwake();
+    stopKeepAwake(); releaseWakeLock();
     setRun(false);
   }
   function reset() {
     setRun(false); setDone(false); setCi(0);
     endRef.current = null; beepRef.current = null;
-    stopKeepAwake();
+    stopKeepAwake(); releaseWakeLock();
     if (ivs.length) setTl(ivs[0].minutes * 60);
   }
   function skip() {
